@@ -20,6 +20,8 @@
   select:focus-visible { outline: 2px solid #ffc46b; outline-offset: 2px; }
   button:hover { background: #4d3120; }
   button:focus-visible { outline: 2px solid #ffc46b; outline-offset: 2px; }
+  #sound { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); margin: 0; padding: 12px 18px; max-width: 86vw;
+    background: #3a2416; border: 1px solid #d98a34; border-radius: 8px; color: #ffc46b; font-size: 15px; text-align: center; pointer-events: none; }
   #hint { position: fixed; left: 24px; bottom: 20px; margin: 0; font-size: 14px; color: #c9a988; pointer-events: none; }
   #start { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 18px; background: rgba(20, 11, 6, .86); text-align: center; padding: 24px; }
@@ -53,6 +55,7 @@
   </div>
 </div>
 <p id="hint"></p>
+<p id="sound" role="status" data-t="soundOff" hidden></p>
 <div id="start">
   <h1 data-t="title"></h1>
   <p data-t="intro"></p>
@@ -132,8 +135,21 @@ const midiToLength = m => CFG.lowFreq * CFG.longest / midiToFreq(m);
 /* ================= 声音（全部由程序合成，没有录音素材） ================= */
 const Sound = {
   ctx: null, out: null, cache: new Map(), warmId: 0,
+  // 手机上的三个坑：iPhone 静音开关会连网页声音一起关；切出去或开摄像头后声音会被挂起；
+  // 旧版 iPhone 要在手指点屏幕时先放一下声音才算“解锁”
+  wake() {
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+    if (!this.ctx) return;
+    if (this.ctx.state !== 'running') this.ctx.resume().catch(() => {});
+    if (!this.unlocked) {
+      const b = this.ctx.createBuffer(1, 1, this.ctx.sampleRate), s = this.ctx.createBufferSource();
+      s.buffer = b; s.connect(this.ctx.destination); s.start(0);
+      this.unlocked = true;
+    }
+  },
   init() {
-    if (this.ctx) { this.ctx.resume(); return; }
+    if (this.ctx) { this.wake(); return; }
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
     const ctx = this.ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
     const limiter = this.limiter = new DynamicsCompressorNode(ctx, { threshold: -14, ratio: 5, attack: .003, release: .2 });
     const master = new GainNode(ctx, { gain: .7 });
@@ -148,7 +164,8 @@ const Sound = {
     this.room = new ConvolverNode(ctx, { buffer: ir });
     this.room.connect(limiter);
     this.use();
-    ctx.resume();
+    this.wake();
+    ctx.onstatechange = showSoundHint;
   },
   // 换成当前选中的乐器
   use() {
@@ -234,6 +251,7 @@ const Sound = {
   },
   play(str, strength, pan) {
     if (!this.ctx) return;
+    if (this.ctx.state !== 'running') this.ctx.resume().catch(() => {});
     const ctx = this.ctx, t = ctx.currentTime, I = INSTRUMENTS[picked.inst];
     if (str.voice) { // 同一根弦再拨：先收掉旧的余音
       str.voice.gain.gain.setTargetAtTime(0, t, .012);
@@ -406,6 +424,9 @@ canvas.addEventListener('contextmenu', e => {
 
 function layStrings(list, top, gap) {
   strings.forEach(s => Sound.stop(s)); strings = [];
+  // 手机上按钮会占好几行：弦从按钮下面开始，挤一挤也要放得下
+  const below = (document.getElementById("bar").getBoundingClientRect().bottom + 28) / H;
+  if (below > top) { gap = Math.min(gap, (.9 - below) / Math.max(1, list.length - 1)); top = below; }
   list.forEach((m, i) => {
     const L = midiToLength(m) * W, y = H * (top + i * gap);
     addString({ x: W / 2 - L / 2, y }, { x: W / 2 + L / 2, y }, m);
@@ -436,6 +457,7 @@ const TEXT = {
     NotSupportedError: '这样打开网页用不了摄像头，请双击“启动空气琴弦.bat”打开。',
     view: '画面', cat: '猫咪头像', dog: '狗狗头像', hidden: '不显示视频', normal: '正常画面',
     faceBlur: '没认出脸，画面先模糊', faceLoading: '正在加载人脸识别，画面先模糊', faceFailed: '人脸识别没加载成功，画面保持模糊',
+    soundOff: '没有声音？点一下屏幕。iPhone 请先关掉侧面的静音开关。',
     loadFailed: '手部识别没有加载成功，请检查网络后再试。'
   },
   en: {
@@ -455,6 +477,7 @@ const TEXT = {
     NotSupportedError: 'The camera does not work when the page is opened this way. Double-click "启动空气琴弦.bat" instead.',
     view: 'Video', cat: 'Cat avatar', dog: 'Dog avatar', hidden: 'Hide video', normal: 'Normal video',
     faceBlur: 'Face not found, video blurred', faceLoading: 'Loading face tracking, video blurred', faceFailed: 'Face tracking failed to load, video stays blurred',
+    soundOff: 'No sound? Tap the screen. On iPhone, also turn off silent mode.',
     loadFailed: 'Hand tracking could not load. Check your internet connection and try again.'
   }
 };
@@ -502,6 +525,17 @@ document.getElementById('undo').onclick = () => { if (strings.length) removeStri
 document.getElementById('clear').onclick = () => { [...strings].forEach(removeString); history = []; };
 document.getElementById('go').onclick = () => { Sound.init(); document.getElementById('start').hidden = true; };
 applyText();
+
+// 每次点屏幕或按键都顺手把声音叫醒；声音被挂起超过半秒就提示
+for (const type of ['pointerdown', 'touchend', 'keydown']) addEventListener(type, () => Sound.wake(), true);
+let soundTimer = 0;
+function showSoundHint() {
+  clearTimeout(soundTimer);
+  const el = document.getElementById('sound');
+  if (Sound.ctx && Sound.ctx.state === 'running') { el.hidden = true; return; }
+  soundTimer = setTimeout(() => { el.hidden = !Sound.ctx || Sound.ctx.state === 'running'; }, 600);
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) Sound.wake(); });
 
 /* ================= 画面 ================= */
 function resize() {

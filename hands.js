@@ -219,6 +219,7 @@ async function openCamera() {
   startBox.hidden = false;
   try {
     await Hands.start();
+    Sound.wake(); // 开摄像头时手机常会挂起声音
     startBox.hidden = true; msgKey = ''; hintKey = 'hintHand';
   } catch (e) {
     console.warn(e);
