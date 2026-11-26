@@ -1,0 +1,3 @@
+# Windows launcher and the Claude artifact copy stay on this computer
+*.bat
+web/

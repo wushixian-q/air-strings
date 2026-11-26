@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>空气琴弦</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1b100a; color: #f3e2c7;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
+  #bar { position: fixed; left: 24px; top: 20px; display: flex; gap: 8px; }
+  button { font: inherit; font-size: 14px; color: #f3e2c7; background: #3a2416; border: 1px solid #6b4730;
+    border-radius: 6px; padding: 8px 14px; cursor: pointer; }
+  #bar { flex-wrap: wrap; max-width: 800px; }
+  #bar label { display: flex; align-items: center; gap: 6px; font-size: 14px; color: #d8bd9e; }
+  #bar .row { display: flex; gap: 8px 14px; flex-wrap: wrap; flex-basis: 100%; }
+  select { font: inherit; font-size: 14px; color: #f3e2c7; background: #3a2416; border: 1px solid #6b4730;
+    border-radius: 6px; padding: 7px 8px; cursor: pointer; }
+  select:focus-visible { outline: 2px solid #ffc46b; outline-offset: 2px; }
+  button:hover { background: #4d3120; }
+  button:focus-visible { outline: 2px solid #ffc46b; outline-offset: 2px; }
+  #hint { position: fixed; left: 24px; bottom: 20px; margin: 0; font-size: 14px; color: #c9a988; pointer-events: none; }
+  #start { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 18px; background: rgba(20, 11, 6, .86); text-align: center; padding: 24px; }
+  #start p { max-width: 62ch; }
+  #start[hidden] { display: none; }
+  #start h1 { margin: 0; font-size: 44px; font-weight: 600; letter-spacing: .12em; }
+  #start p { margin: 0; color: #d8bd9e; line-height: 1.9; }
+  #msg { min-height: 2em; color: #ffc46b !important; }
+  #start div { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  button:disabled { opacity: .5; cursor: default; }
+  #go { font-size: 18px; padding: 12px 28px; }
+  #goCam { font-size: 18px; padding: 12px 36px; background: #d98a34; border-color: #d98a34; color: #24140a; }
+  #goCam:hover { background: #eda04a; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="bar">
+  <button id="six" data-t="six"></button>
+  <button id="ladder" data-t="ladder"></button>
+  <button id="undo" data-t="undo"></button>
+  <button id="clear" data-t="clear"></button>
+  <button id="cam"></button>
+  <button class="lang" id="lang" data-t="lang"></button>
+  <div class="row">
+    <label><span data-t="view"></span><select id="view"></select></label>
+    <label><span data-t="inst"></span><select id="inst"></select></label>
+    <label><span data-t="mode"></span><select id="mode"></select></label>
+    <label><span data-t="root"></span><select id="root"></select></label>
+    <label><span data-t="scale"></span><select id="scale"></select></label>
+  </div>
+</div>
+<p id="hint"></p>
+<div id="start">
+  <h1 data-t="title"></h1>
+  <p data-t="intro"></p>
+  <div><button id="goCam" data-t="goCam"></button><button id="go" data-t="go"></button></div>
+  <p id="msg" role="status"></p>
+  <button class="lang" data-t="lang"></button>
+</div>
+
+<script>
+/* ================= 可以随意调的参数 ================= */
+const CFG = {
+  lowFreq: 82.41,        // 最低音 E2（Hz）
+  highMidi: 84,          // 最高音 C6
+  lowMidi: 40,           // 最低音 E2
+  longest: 0.75,         // 弦长达到屏幕宽度的这个比例时，是最低音
+  minLength: 0.045,       // 比这还短就不算弦
+  afterCreateMute: 300,  // 刚拉好弦后多少毫秒内不会被误弹
+  repluckGap: 45         // 同一根弦两次拨动的最短间隔（毫秒）
+};
+
+/* ================= 音高 ================= */
+const NAMES = ['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
+const midiToFreq = m => 440 * 2 ** ((m - 69) / 12);
+// 自由音高落在两个音之间时，前面加 ≈
+const noteName = m => {
+  const n = Math.round(m);
+  return (Math.abs(m - n) < .01 ? '' : '≈') + NAMES[n % 12] + (Math.floor(n / 12) - 1);
+};
+// 音阶：从主音算起，每个音隔几个半音
+const SCALES = {
+  gong: [{ zh: '五声·宫调（明亮）', en: 'Pentatonic major (gong)' }, [0, 2, 4, 7, 9]],
+  yu: [{ zh: '五声·羽调（柔和）', en: 'Pentatonic minor (yu)' }, [0, 3, 5, 7, 10]],
+  major: [{ zh: '大调', en: 'Major' }, [0, 2, 4, 5, 7, 9, 11]],
+  minor: [{ zh: '小调', en: 'Minor' }, [0, 2, 3, 5, 7, 8, 10]],
+  blues: [{ zh: '布鲁斯', en: 'Blues' }, [0, 3, 5, 6, 7, 10]],
+  miyako: [{ zh: '日本都节', en: 'Japanese miyako-bushi' }, [0, 1, 5, 7, 8]],
+  all: [{ zh: '全部半音（不限）', en: 'All semitones' }, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]]
+};
+
+/* ================= 乐器库 =================
+   sustain 余音秒数；bright 0.5 最闷、越小越亮；pick 拨弦位置；soft 越小起音越柔
+   eq 琴身共鸣 [频率, 宽窄, 增益]；echo 混响量；vib 揉弦 [快慢Hz, 幅度音分]；bend 起音时偏高多少音分 */
+const INSTRUMENTS = {
+  guitar:  { name: { zh: '吉他', en: 'Guitar' }, sustain: 4, bright: .45, pick: .16, soft: .6, eq: [[105, 1.4, 4], [210, 1.8, 3]], echo: .08 },
+  guzheng: { name: { zh: '古筝', en: 'Guzheng' }, sustain: 6, bright: .22, pick: .07, soft: .95, eq: [[320, 1.2, 4], [900, 1.5, 3], [2600, 1, 3]], echo: .22, vib: [5, 9], bend: 22 },
+  pipa:    { name: { zh: '琵琶', en: 'Pipa' }, sustain: 1.8, bright: .25, pick: .05, soft: 1, eq: [[480, 1.5, 5], [1300, 1.6, 5]], echo: .08, bend: 12 },
+  harp:    { name: { zh: '竖琴', en: 'Harp' }, sustain: 5, bright: .5, pick: .42, soft: .28, eq: [[180, 1, 3]], echo: .38 },
+  ukulele: { name: { zh: '尤克里里', en: 'Ukulele' }, sustain: 1.6, bright: .48, pick: .25, soft: .4, eq: [[260, 1.4, 4], [520, 1.6, 4]], echo: .06 },
+  eguitar: { name: { zh: '电吉他', en: 'Electric guitar' }, sustain: 5, bright: .4, pick: .12, soft: .7, eq: [[750, 1, 4]], echo: .15, drive: 14 },
+  musicbox:{ name: { zh: '八音盒', en: 'Music box' }, sustain: 3, chime: true, eq: [[2400, 1, 2]], echo: .3 }
+};
+
+/* ================= 当前选择（会记住） ================= */
+const picked = { inst: 'guitar', mode: 'free', root: 2, scale: 'gong', lang: 'zh', view: 'cat' };
+try { Object.assign(picked, JSON.parse(localStorage.getItem('air-strings') || '{}')); } catch (e) {}
+if (!INSTRUMENTS[picked.inst]) picked.inst = 'guitar';
+if (!['free', 'scale'].includes(picked.mode)) picked.mode = 'free';
+if (!['cat', 'dog', 'hidden', 'normal'].includes(picked.view)) picked.view = 'cat';
+if (!['zh', 'en'].includes(picked.lang)) picked.lang = 'zh';
+if (!SCALES[picked.scale]) picked.scale = 'gong';
+if (!(picked.root >= 0 && picked.root < 12)) picked.root = 2;
+let ALLOWED = [];
+function buildScale() {
+  const steps = SCALES[picked.scale][1];
+  ALLOWED = [];
+  for (let m = CFG.lowMidi; m <= CFG.highMidi; m++) if (steps.includes((m - picked.root + 120) % 12)) ALLOWED.push(m);
+}
+buildScale();
+const nearestAllowed = raw => ALLOWED.reduce((a, b) => Math.abs(b - raw) < Math.abs(a - raw) ? b : a);
+
+// 弦长（占屏幕宽度的比例）→ 音高：频率 = 常数 ÷ 弦长
+const lengthToRaw = len => Math.min(CFG.highMidi, Math.max(CFG.lowMidi, 69 + 12 * Math.log2(CFG.lowFreq * CFG.longest / len / 440)));
+// 自由模式：弦长是多少就是多少；音阶模式：靠到音阶里最近的音
+const lengthToMidi = len => picked.mode === 'free' ? lengthToRaw(len) : nearestAllowed(lengthToRaw(len));
+const midiToLength = m => CFG.lowFreq * CFG.longest / midiToFreq(m);
+
+/* ================= 声音（全部由程序合成，没有录音素材） ================= */
+const Sound = {
+  ctx: null, out: null, cache: new Map(), warmId: 0,
+  init() {
+    if (this.ctx) { this.ctx.resume(); return; }
+    const ctx = this.ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+    const limiter = this.limiter = new DynamicsCompressorNode(ctx, { threshold: -14, ratio: 5, attack: .003, release: .2 });
+    const master = new GainNode(ctx, { gain: .7 });
+    limiter.connect(master).connect(ctx.destination);
+    // 混响：一段逐渐变弱的噪音当作房间回声
+    const n = ctx.sampleRate * 2, ir = ctx.createBuffer(2, n, ctx.sampleRate);
+    for (let c = 0; c < 2; c++) {
+      const d = ir.getChannelData(c);
+      let lp = 0;
+      for (let i = 0; i < n; i++) { lp += .45 * ((Math.random() * 2 - 1) - lp); d[i] = lp * Math.exp(-i / ctx.sampleRate * 3.2); }
+    }
+    this.room = new ConvolverNode(ctx, { buffer: ir });
+    this.room.connect(limiter);
+    this.use();
+    ctx.resume();
+  },
+  // 换成当前选中的乐器
+  use() {
+    if (!this.ctx) return;
+    const ctx = this.ctx, I = INSTRUMENTS[picked.inst];
+    const input = new GainNode(ctx);
+    let node = input;
+    const add = x => { node.connect(x); node = x; };
+    if (I.drive) { // 失真
+      const curve = new Float32Array(1025);
+      for (let i = 0; i < 1025; i++) curve[i] = Math.tanh(I.drive * (i / 512 - 1)) * .14;
+      add(new WaveShaperNode(ctx, { curve, oversample: '4x' }));
+      add(new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 4200, Q: .7 }));
+    }
+    for (const [frequency, Q, gain] of I.eq) add(new BiquadFilterNode(ctx, { type: 'peaking', frequency, Q, gain }));
+    node.connect(this.limiter);
+    const send = new GainNode(ctx, { gain: I.echo });
+    node.connect(send).connect(this.room);
+    const oldNode = this.tail, oldSend = this.send;
+    this.out = input; this.tail = node; this.send = send;
+    if (oldNode) setTimeout(() => { oldNode.disconnect(); oldSend.disconnect(); }, 7000); // 等旧余音响完
+    this.cache = new Map();
+    this.warm();
+  },
+  // 分批提前算好每个音，避免第一次弹时卡顿
+  warm() {
+    if (!this.ctx) return;
+    const id = ++this.warmId, list = [...ALLOWED];
+    for (let m = CFG.lowMidi; m <= CFG.highMidi; m++) if (!ALLOWED.includes(m)) list.push(m); // 自由音高也要用
+    const step = () => { if (id === this.warmId && list.length) { this.buffer(list.shift()); setTimeout(step, 0); } };
+    step();
+  },
+  render(freq, sr, I = INSTRUMENTS[picked.inst]) {
+    const n = Math.floor(sr * I.sustain), out = new Float32Array(n);
+    if (I.chime) { // 八音盒：几个不成整数倍的泛音，高的衰减快
+      for (const [k, amp, life] of [[1, 1, 1], [2.76, .3, .35], [5.4, .18, .16], [8.93, .08, .08]]) {
+        if (freq * k > sr * .45) continue;
+        const w = 2 * Math.PI * freq * k / sr, dec = 5 / (I.sustain * life) / sr;
+        for (let i = 0; i < n; i++) out[i] += amp * Math.sin(w * i) * Math.exp(-dec * i);
+      }
+    } else { // 拨弦：Karplus-Strong
+      const s = I.bright, total = sr / freq;
+      const P = Math.floor(total - s - 0.1), frac = total - s - P, C = (1 - frac) / (1 + frac);
+      const noise = new Float32Array(P), ring = new Float32Array(P);
+      let lp = 0;
+      for (let i = 0; i < P; i++) { lp += I.soft * ((Math.random() * 2 - 1) - lp); noise[i] = lp; }
+      const shift = Math.max(1, Math.round(P * I.pick));
+      let mean = 0;
+      for (let i = 0; i < P; i++) { ring[i] = noise[i] - noise[(i - shift + P) % P]; mean += ring[i] / P; }
+      for (let i = 0; i < P; i++) ring[i] -= mean;
+      const g = 10 ** (-3 / (freq * I.sustain));
+      let prev = 0, ax = 0, ay = 0, k = 0;
+      for (let i = 0; i < n; i++) {
+        const cur = ring[k], low = (1 - s) * cur + s * prev;
+        const ap = C * low + ax - C * ay;
+        prev = cur; ax = low; ay = ap;
+        ring[k] = ap * g; out[i] = cur;
+        if (++k === P) k = 0;
+      }
+    }
+    // 让各乐器、各音的响度差不多
+    let peak = 0, sum = 0;
+    const head = Math.floor(sr * .25);
+    for (let i = 0; i < n; i++) { const a = Math.abs(out[i]); if (a > peak) peak = a; if (i < head) sum += a * a; }
+    const scale = Math.min(.17 / Math.sqrt(sum / head), .95 / peak);
+    const fadeIn = Math.floor(sr * .001), fadeOut = Math.floor(sr * .3);
+    for (let i = 0; i < n; i++) {
+      let e = scale;
+      if (i < fadeIn) e *= i / fadeIn;
+      if (i > n - fadeOut) e *= (n - i) / fadeOut;
+      out[i] *= e;
+    }
+    return out;
+  },
+  buffer(midi) {
+    if (!this.cache.has(midi)) {
+      const sr = this.ctx.sampleRate, data = this.render(midiToFreq(midi), sr);
+      const b = this.ctx.createBuffer(1, data.length, sr);
+      b.copyToChannel(data, 0);
+      this.cache.set(midi, b);
+    }
+    return this.cache.get(midi);
+  },
+  play(str, strength, pan) {
+    if (!this.ctx) return;
+    const ctx = this.ctx, t = ctx.currentTime, I = INSTRUMENTS[picked.inst];
+    if (str.voice) { // 同一根弦再拨：先收掉旧的余音
+      str.voice.gain.gain.setTargetAtTime(0, t, .012);
+      str.voice.src.stop(t + .1);
+    }
+    // 自由音高：取最近的半音，再微调音分
+    const semi = Math.round(str.midi), cents = (str.midi - semi) * 100;
+    const src = new AudioBufferSourceNode(ctx, { buffer: this.buffer(semi), detune: cents });
+    if (I.bend) { src.detune.setValueAtTime(cents + I.bend * strength, t); src.detune.setTargetAtTime(cents, t, .04); }
+    let lfo = null;
+    if (I.vib) { // 揉弦：响了一会儿才慢慢出现
+      lfo = new OscillatorNode(ctx, { frequency: I.vib[0] });
+      const depth = new GainNode(ctx, { gain: 0 });
+      depth.gain.setValueAtTime(0, t + .3); depth.gain.linearRampToValueAtTime(I.vib[1], t + .9);
+      lfo.connect(depth).connect(src.detune); lfo.start(t);
+    }
+    const tone = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 1400 + 9000 * strength * (I.soft ?? 1), Q: .3 });
+    const gain = new GainNode(ctx, { gain: .18 + .62 * strength });
+    const panner = new StereoPannerNode(ctx, { pan });
+    src.connect(tone).connect(gain).connect(panner).connect(this.out);
+    src.onended = () => { panner.disconnect(); if (lfo) lfo.stop(); };
+    src.start(t);
+    str.voice = { src, gain };
+  },
+  stop(str) {
+    if (!str.voice) return;
+    const t = this.ctx.currentTime;
+    str.voice.gain.gain.setTargetAtTime(0, t, .03);
+    str.voice.src.stop(t + .25);
+    str.voice = null;
+  }
+};
+
+/* ================= 弦的核心（以后摄像头也调用这几个函数） ================= */
+const canvas = document.getElementById('c'), g2 = canvas.getContext('2d');
+let W = 0, H = 0;
+let Hands = null; // 在 hands.js 里
+let strings = [], draft = null, history = [], dust = [];
+const now = () => performance.now();
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+// 位置用 0~1 的比例保存，窗口大小变化后仍在原处
+const toRel = p => ({ x: p.x / W, y: p.y / H });
+const toPx = p => ({ x: p.x * W, y: p.y * H });
+
+// 每根弦随机一个颜色，尽量不和最近几根重复
+const HUES = [5, 28, 48, 80, 135, 165, 190, 215, 265, 295, 330];
+let recentHues = [], nextHue = 0;
+function rollHue() {
+  const free = HUES.filter(h => !recentHues.includes(h));
+  nextHue = free[Math.floor(Math.random() * free.length)];
+  recentHues = [nextHue, ...recentHues].slice(0, 6);
+}
+rollHue();
+
+function makeString(a, b, midi, hue) {
+  if (a.x > b.x) [a, b] = [b, a];
+  return { a: toRel(a), b: toRel(b), midi, hue, len: midiToLength(midi), born: now(), last: -1e9, amp: 0, pos: .5, dir: 1, voice: null };
+}
+function addString(a, b, midi, hue) {
+  const len = dist(a, b) / W;
+  if (len < CFG.minLength) return null;
+  const s = makeString(a, b, midi ?? lengthToMidi(len), hue ?? nextHue);
+  if (midi === undefined) { s.len = len; s.free = picked.mode === 'free'; }
+  if (hue === undefined) rollHue();
+  strings.push(s);
+  return s;
+}
+function removeString(s) { Sound.stop(s); strings = strings.filter(x => x !== s); }
+
+// 指尖从 p 移到 q：检查这一小段有没有穿过弦
+// blocked：这根手指刚拨过、还没离开的弦，防止手抖连响
+function sweep(p, q, ms, blocked) {
+  const hits = [];
+  for (const s of strings) {
+    const a = toPx(s.a), b = toPx(s.b);
+    const rx = q.x - p.x, ry = q.y - p.y, sx = b.x - a.x, sy = b.y - a.y;
+    const d = rx * sy - ry * sx;
+    if (Math.abs(d) < 1e-6) continue;
+    const t = ((a.x - p.x) * sy - (a.y - p.y) * sx) / d;
+    const u = ((a.x - p.x) * ry - (a.y - p.y) * rx) / d;
+    if (t > 0 && t <= 1 && u >= 0 && u <= 1) hits.push({ s, t, u });
+  }
+  hits.sort((x, y) => x.t - y.t);
+  const speed = dist(p, q) / Math.max(ms, 4) / H * 1000; // 每秒划过几个屏幕高度
+  const strength = Math.min(1, Math.max(.15, Math.sqrt(speed / 5)));
+  for (const h of hits) {
+    if (blocked && blocked.has(h.s)) continue;
+    pluck(h.s, strength, h.u, Math.sign(q.y - p.y) || 1);
+    if (blocked) blocked.add(h.s);
+  }
+}
+function pluck(s, strength, u, dir) {
+  const t = now();
+  if (t - s.born < CFG.afterCreateMute || t - s.last < CFG.repluckGap) return;
+  s.last = t; s.amp = strength; s.pos = Math.min(.95, Math.max(.05, u)); s.dir = dir;
+  const a = toPx(s.a), b = toPx(s.b), x = a.x + (b.x - a.x) * u, y = a.y + (b.y - a.y) * u;
+  Sound.play(s, strength, Math.max(-.6, Math.min(.6, (x / W - .5) * 1.2)));
+  history.unshift({ midi: s.midi, hue: s.hue, t });
+  history.length = Math.min(history.length, 8);
+  for (let i = 0; i < 6 + 14 * strength; i++)
+    dust.push({ x, y, vx: (Math.random() - .5) * 220, vy: (Math.random() - .5) * 160 + dir * 90 * strength, t, life: 500 + Math.random() * 500, hue: s.hue });
+}
+
+/* ================= 鼠标输入 ================= */
+let pointer = null, drag = null;
+const at = e => ({ x: e.clientX, y: e.clientY });
+function nearEnd(p) {
+  for (const s of [...strings].reverse()) {
+    if (dist(p, toPx(s.a)) < 16) return { s, fixed: toPx(s.b) };
+    if (dist(p, toPx(s.b)) < 16) return { s, fixed: toPx(s.a) };
+  }
+  return null;
+}
+function lineDist(s, p) {
+  const a = toPx(s.a), b = toPx(s.b), L2 = dist(a, b) ** 2 || 1;
+  const u = Math.max(0, Math.min(1, ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / L2));
+  return dist(p, { x: a.x + u * (b.x - a.x), y: a.y + u * (b.y - a.y) });
+}
+function nearString(p) {
+  let best = null, bd = 12;
+  for (const s of strings) {
+    const d = lineDist(s, p);
+    if (d < bd) { bd = d; best = s; }
+  }
+  return best;
+}
+// 按住后先看往哪个方向动：横着 = 拉弦，竖着 = 扫弦（手机上没有“悬停”，只能这样拨）
+let press = null;
+canvas.addEventListener('pointerdown', e => {
+  if (e.button !== 0) return;
+  const p = at(e), end = nearEnd(p);
+  draft = null;
+  if (end) { Sound.stop(end.s); drag = { origin: end.fixed, edit: end.s }; }
+  else press = { origin: p, strum: false };
+  pointer = { ...p, t: e.timeStamp };
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', e => {
+  const p = at(e), t = e.timeStamp;
+  if (press && !press.strum) {
+    const dx = Math.abs(p.x - press.origin.x), dy = Math.abs(p.y - press.origin.y);
+    if (Math.hypot(dx, dy) < 10) return;
+    if (dy > dx * 1.2) { press.strum = true; sweep(press.origin, p, t - pointer.t); pointer = { ...p, t }; return; }
+    drag = { origin: press.origin, edit: null }; press = null;
+  }
+  if (drag) {
+    const len = dist(drag.origin, p) / W;
+    draft = len < CFG.minLength ? null : { a: drag.origin, b: p, midi: lengthToMidi(len), hue: drag.edit ? drag.edit.hue : nextHue };
+  } else {
+    if (pointer) sweep(pointer, p, t - pointer.t);
+    canvas.style.cursor = nearEnd(p) ? 'grab' : 'crosshair';
+  }
+  pointer = { ...p, t };
+});
+canvas.addEventListener('pointerup', e => {
+  if (drag && draft) {
+    const s = addString(draft.a, draft.b, undefined, drag.edit ? drag.edit.hue : undefined);
+    if (s && drag.edit) removeString(drag.edit);
+  } else if (drag && drag.edit) removeString(drag.edit); // 把端点拖到另一端 = 删除
+  drag = draft = press = null;
+  if (e.pointerType !== 'mouse') pointer = null;
+});
+canvas.addEventListener('pointercancel', () => { drag = draft = press = pointer = null; });
+canvas.addEventListener('pointerleave', () => { pointer = null; });
+canvas.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  const s = nearString(at(e));
+  if (s && !drag) removeString(s);
+});
+
+function layStrings(list, top, gap) {
+  strings.forEach(s => Sound.stop(s)); strings = [];
+  list.forEach((m, i) => {
+    const L = midiToLength(m) * W, y = H * (top + i * gap);
+    addString({ x: W / 2 - L / 2, y }, { x: W / 2 + L / 2, y }, m);
+  });
+}
+// 标准吉他空弦 E A D G B E，不在音阶里的换成最近的音
+document.getElementById('six').onclick = () => layStrings([40, 45, 50, 55, 59, 64].map(nearestAllowed), .26, .105);
+// 从主音开始的连续 8 个音，低音在下、高音在上
+document.getElementById('ladder').onclick = () => {
+  const low = 45 + (picked.root - 9 + 12) % 12;
+  layStrings(ALLOWED.filter(m => m >= low).slice(0, 8).reverse(), .25, .082);
+};
+const TEXT = {
+  zh: {
+    title: '空气琴弦', six: '放六根弦', ladder: '放一组音阶', undo: '撤销一根', clear: '清空', lang: 'English',
+    inst: '乐器', mode: '画弦', root: '主音', scale: '音阶', free: '自由（任意音高）', follow: '按音阶',
+    camOn: '开摄像头', camOff: '关摄像头', goCam: '用摄像头弹', go: '用鼠标弹',
+    intro: '双手拇指和食指捏住，向两边拉，再松开，就放好一根弦。弦越长，声音越低。<br>张开手，用食指上下划过弦，就能弹响它。<br>摄像头画面只在这台电脑上处理，不会上传。',
+    hintMouse: '横着拖：拉弦　｜　划过弦（或按住竖着划）：拨弦　｜　拖端点：调音　｜　端点拖到另一端或右键：删除',
+    introMouse: '按住横着拖，拉出一根弦，弦越长声音越低。<br>按住竖着划过弦，就能弹响它；电脑上用鼠标直接划过也行。<br>也可以点“放一组音阶”，直接弹旋律。',
+    hintHand: '双手捏住再松开：放一根弦　｜　张开手，食指划过：拨弦　｜　捏住端点：调音　｜　端点推到另一端：删除',
+    hintLost: '摄像头断开了，现在可以用鼠标弹。',
+    noHand: '没看到手：把双手举到镜头前，尽量让光线亮一些',
+    loading: '正在打开摄像头、加载手部识别，第一次大约要下载 21 MB……',
+    NotAllowedError: '摄像头没有获得允许。点地址栏旁的摄像头图标改成“允许”，再试一次。',
+    NotFoundError: '没有找到摄像头，请检查是否插好。',
+    NotReadableError: '摄像头打不开，可能正被 Zoom 等软件占用。',
+    NotSupportedError: '这样打开网页用不了摄像头，请双击“启动空气琴弦.bat”打开。',
+    view: '画面', cat: '猫咪头像', dog: '狗狗头像', hidden: '不显示视频', normal: '正常画面',
+    faceBlur: '没认出脸，画面先模糊', faceLoading: '正在加载人脸识别，画面先模糊', faceFailed: '人脸识别没加载成功，画面保持模糊',
+    loadFailed: '手部识别没有加载成功，请检查网络后再试。'
+  },
+  en: {
+    title: 'Air Strings', six: 'Six strings', ladder: 'Full scale', undo: 'Undo', clear: 'Clear', lang: '中文',
+    inst: 'Instrument', mode: 'Drawing', root: 'Key', scale: 'Scale', free: 'Free (any pitch)', follow: 'Follow scale',
+    camOn: 'Camera on', camOff: 'Camera off', goCam: 'Play with camera', go: 'Play with mouse',
+    intro: 'Pinch thumb and index finger on both hands, pull apart, then let go to place a string. Longer strings sound lower.<br>Open your hand and sweep your index finger up or down across a string to play it.<br>Camera video is processed on this computer only and is never uploaded.',
+    hintMouse: 'Drag sideways: draw a string　|　Sweep across (or drag down): pluck　|　Drag an end: retune　|　Drag an end onto the other, or right-click: delete',
+    introMouse: 'Drag sideways to draw a string. Longer strings sound lower.<br>Drag up or down across a string to play it. With a mouse you can also just move across it.<br>Or press Full scale and play a melody.',
+    hintHand: 'Pinch both hands and let go: place a string　|　Open hand, sweep index finger: pluck　|　Pinch an end: retune　|　Push one end onto the other: delete',
+    hintLost: 'The camera disconnected. You can play with the mouse.',
+    noHand: 'No hands in view. Raise both hands to the camera, in good light',
+    loading: 'Opening the camera and loading hand tracking. The first time downloads about 21 MB…',
+    NotAllowedError: 'Camera access is blocked. Click the camera icon by the address bar, choose Allow, and try again.',
+    NotFoundError: 'No camera found. Check that it is plugged in.',
+    NotReadableError: 'The camera could not be opened. Another app such as Zoom may be using it.',
+    NotSupportedError: 'The camera does not work when the page is opened this way. Double-click "启动空气琴弦.bat" instead.',
+    view: 'Video', cat: 'Cat avatar', dog: 'Dog avatar', hidden: 'Hide video', normal: 'Normal video',
+    faceBlur: 'Face not found, video blurred', faceLoading: 'Loading face tracking, video blurred', faceFailed: 'Face tracking failed to load, video stays blurred',
+    loadFailed: 'Hand tracking could not load. Check your internet connection and try again.'
+  }
+};
+const tr = key => TEXT[picked.lang][key];
+let hintKey = 'hintMouse', msgKey = '', barRight = 0;
+const save = () => { try { localStorage.setItem('air-strings', JSON.stringify(picked)); } catch (e) {} };
+const pickers = [];
+function fill(id, options, changed) {
+  const el = document.getElementById(id);
+  for (const [value] of options()) el.add(new Option('', value));
+  pickers.push(() => options().forEach(([, text], i) => { el.options[i].text = text; }));
+  el.value = picked[id];
+  el.onchange = () => {
+    picked[id] = id === 'root' ? +el.value : el.value;
+    save(); changed(); el.blur();
+  };
+}
+function applyText() {
+  document.documentElement.lang = picked.lang === 'zh' ? 'zh-CN' : 'en';
+  document.title = tr('title');
+  for (const el of document.querySelectorAll('[data-t]')) el.innerHTML = tr(el.dataset.t);
+  for (const f of pickers) f();
+  const cam = document.getElementById('cam');
+  if (cam) cam.textContent = tr(Hands && Hands.on ? 'camOff' : 'camOn');
+  document.getElementById('hint').textContent = tr(hintKey);
+  document.getElementById('msg').textContent = msgKey ? tr(msgKey) : '';
+  barRight = document.getElementById('lang').getBoundingClientRect().right + 20;
+}
+for (const b of document.querySelectorAll('.lang')) b.onclick = () => {
+  picked.lang = picked.lang === 'zh' ? 'en' : 'zh';
+  save(); applyText();
+};
+function scaleChanged() {
+  buildScale();
+  for (const s of strings) if (!s.free) { Sound.stop(s); s.midi = nearestAllowed(lengthToRaw(s.len)); } // 自由画的弦不动，其余换成新音阶里最近的音
+  Sound.warm();
+}
+// 画面：头像 / 不显示 / 正常
+fill('view', () => ['cat', 'dog', 'hidden', 'normal'].map(k => [k, tr(k)]), () => { if (Hands && Hands.on && Face.wanted()) Face.load(); });
+fill('inst', () => Object.entries(INSTRUMENTS).map(([k, v]) => [k, v.name[picked.lang]]), () => Sound.use());
+fill('mode', () => [['free', tr('free')], ['scale', tr('follow')]], () => {}); // 只影响之后画的弦
+fill('root', () => NAMES.map((n, i) => [i, n]), scaleChanged);
+fill('scale', () => Object.entries(SCALES).map(([k, v]) => [k, v[0][picked.lang]]), scaleChanged);
+document.getElementById('undo').onclick = () => { if (strings.length) removeString(strings[strings.length - 1]); };
+document.getElementById('clear').onclick = () => { [...strings].forEach(removeString); history = []; };
+document.getElementById('go').onclick = () => { Sound.init(); document.getElementById('start').hidden = true; };
+applyText();
+
+/* ================= 画面 ================= */
+function resize() {
+  const r = window.devicePixelRatio || 1;
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * r; canvas.height = H * r;
+  g2.setTransform(r, 0, 0, r, 0, 0);
+}
+addEventListener('resize', resize); resize();
+addEventListener('resize', applyText);
+
+// 低音弦粗，高音弦细
+const high = m => (m - CFG.lowMidi) / (CFG.highMidi - CFG.lowMidi);
+const color = (hue, alpha = 1) => `hsla(${hue}, 92%, 66%, ${alpha})`;
+
+function background() {
+  if (Hands && Hands.on && picked.view !== 'hidden') return Hands.drawVideo();
+  const cx = W / 2, cy = H / 2, R = Math.min(W, H) * .33;
+  const bg = g2.createRadialGradient(cx, cy, R * .3, cx, cy, Math.max(W, H) * .7);
+  bg.addColorStop(0, '#54301b'); bg.addColorStop(1, '#1b100a');
+  g2.fillStyle = bg; g2.fillRect(0, 0, W, H);
+  g2.fillStyle = '#150b06'; g2.beginPath(); g2.arc(cx, cy, R, 0, 7); g2.fill(); // 音孔
+  [[1.04, 2, '#8a5a33'], [1.075, 6, '#3a2012'], [1.11, 2, '#8a5a33']].forEach(([k, w, c]) => {
+    g2.strokeStyle = c; g2.lineWidth = w; g2.beginPath(); g2.arc(cx, cy, R * k, 0, 7); g2.stroke();
+  });
+}
+function drawString(a, b, midi, amp, age, pos, dir, label, hue) {
+  const L = dist(a, b) || 1, nx = -(b.y - a.y) / L, ny = (b.x - a.x) / L, n = Math.max(12, Math.round(L / 10));
+  const path = new Path2D();
+  for (let i = 0; i <= n; i++) {
+    const u = i / n;
+    let off = 0;
+    if (amp > .004) for (let k = 1; k <= 4; k++)
+      off += Math.sin(k * Math.PI * pos) * Math.sin(k * Math.PI * u) / (k * k) * Math.cos(age * .05 * k * (1 + high(midi)));
+    off *= amp * dir * Math.min(26, L * .06);
+    const x = a.x + (b.x - a.x) * u + nx * off, y = a.y + (b.y - a.y) * u + ny * off;
+    i ? path.lineTo(x, y) : path.moveTo(x, y);
+  }
+  const w = 4.2 - 2.6 * high(midi);
+  g2.lineCap = 'round';
+  g2.globalCompositeOperation = 'lighter';
+  if (amp > .01) for (const [m, al] of [[7, .10], [3.5, .18]]) {
+    g2.strokeStyle = color(hue, al * Math.min(1, amp * 1.6)); g2.lineWidth = w * m; g2.stroke(path);
+  }
+  g2.globalCompositeOperation = 'source-over';
+  g2.strokeStyle = color(hue); g2.lineWidth = w; g2.stroke(path);
+  g2.strokeStyle = 'rgba(255,248,232,.55)'; g2.lineWidth = w * .3; g2.stroke(path);
+  for (const p of [a, b]) {
+    g2.fillStyle = '#efe0c6'; g2.beginPath(); g2.arc(p.x, p.y, 6, 0, 7); g2.fill();
+    g2.fillStyle = '#3a2012'; g2.beginPath(); g2.arc(p.x, p.y, 2, 0, 7); g2.fill();
+  }
+  const end = a.x > b.x ? a : b;
+  g2.font = '600 15px "Segoe UI", sans-serif';
+  const tw = g2.measureText(label).width;
+  g2.textAlign = 'left'; g2.textBaseline = 'middle'; g2.fillStyle = '#f3e2c7';
+  g2.fillText(label, Math.min(end.x + 14, W - tw - 8), end.x + 14 + tw > W - 8 ? end.y - 18 : end.y);
+}
+function frame() {
+  const t = now();
+  if (Hands) Hands.tick();
+  background();
+  for (const s of strings) {
+    if (drag && drag.edit === s && draft) continue;
+    const age = t - s.last, amp = s.amp * Math.exp(-age / (900 - 450 * high(s.midi)));
+    drawString(toPx(s.a), toPx(s.b), s.midi, amp, age, s.pos, s.dir, noteName(s.midi), s.hue);
+  }
+  if (draft) drawString(draft.a, draft.b, draft.midi, .12, t, .5, 1,
+    `${noteName(draft.midi)}  ${Math.round(midiToFreq(draft.midi))} Hz`, draft.hue);
+  if (Hands && Hands.on) Hands.draw();
+  dust = dust.filter(d => t - d.t < d.life);
+  for (const d of dust) {
+    const s = (t - d.t) / 1000;
+    g2.fillStyle = color(d.hue, 1 - (t - d.t) / d.life);
+    g2.fillRect(d.x + d.vx * s, d.y + d.vy * s + 120 * s * s, 2, 2);
+  }
+  let x = W - 28;
+  g2.textAlign = 'right'; g2.textBaseline = 'middle';
+  history.forEach((h, i) => {
+    g2.font = `600 ${i ? 18 : 38}px "Segoe UI", sans-serif`;
+    g2.fillStyle = color(h.hue, i ? .75 - i * .08 : 1);
+    const n = noteName(h.midi);
+    if (x - g2.measureText(n).width < barRight) return; // 别压到左上角按钮
+    g2.fillText(n, x, 42); x -= g2.measureText(n).width + 14;
+  });
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+<script src="avatar.js"></script>
+<script src="hands.js"></script>
+</body>
+</html>
